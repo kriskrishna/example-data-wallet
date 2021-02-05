@@ -90,3 +90,71 @@ docker-compose up -d client
 ## BigchainDB JavaScript Driver
 
 see the [js-bigchaindb-driver](https://github.com/bigchaindb/js-bigchaindb-driver) for more details
+
+KAFKA
+
+    /**
+     * Listen to transactions topic
+     *
+     * @param transactions JSON list of transactions
+     * @param partition
+     * @param topic
+     * @param offset
+     * @param ts
+     */
+    @KafkaListener(topics = "#{" + KafkaListenerConfig.CONSUMER_PROPS + ".topic}", groupId = "#{"
+        + KafkaListenerConfig.CONSUMER_PROPS + ".group}",
+        containerFactory = KafkaListenerConfig.CONSUMER_CONTAINER_FACTORY)
+    public void listen(@Payload List<String> transactions,
+            @Header(KafkaHeaders.RECEIVED_PARTITION_ID) int partition,
+            @Header(KafkaHeaders.RECEIVED_TOPIC) String topic, @Header(KafkaHeaders.OFFSET) Long offset,
+            @Header(KafkaHeaders.RECEIVED_TIMESTAMP) long ts) {
+        logger.debug("Incoming records [{}] [{}:{}]", topic, partition, offset);
+
+        if (CollectionUtils.isEmpty(transactions)) {
+            logger.debug("Skipping blank transactions [{}] [{}:{}]", topic, partition, offset);
+            return;
+        }
+
+        try {
+            logger.debug("Start processing {} transaction.", transactions.size());
+
+            transactions.parallelStream().forEach(
+                this::processTransaction
+            );
+
+        } catch (RuntimeException e) {
+            exceptionHandler.handleSystemError(e, null);
+        }
+    }
+
+    /**
+     * Process transaction and handle exceptions.
+     *
+     * @param jsonTrans
+     * @param counter
+     * @param transSize
+     */
+    @SuppressWarnings("squid:S1181") /* catching Error because of MongoDB dynamic class loading issues */
+    private void processTransaction(final String jsonTrans) {
+        String transactionId = null;
+        Transaction transaction = null;
+
+        try {
+            transaction = modelJsonConverter.toTransaction(jsonTrans);
+            transactionId = transaction.getId();
+            logger.info("Bulk processing trans [{}] - started.", transactionId);
+
+            ewsClientService.accountValidation(transaction);
+            logger.info("Bulk processing trans [{}] - finished.", transactionId);
+
+        } catch(ClientNotFoundException cnfe) {
+            exceptionHandler.handle(cnfe, transaction);
+        } catch(ClientAuthorizationException cae) {
+            exceptionHandler.handle(cae, transaction);
+        } catch(DataValidationException dve) {
+            exceptionHandler.handle(dve, transaction);
+        } catch (RuntimeException | Error e) { /* e.g. MongoDB NoClassDefFoundError */
+            exceptionHandler.handleSystemError(e, transactionId);
+        }
+    }
